@@ -79,6 +79,29 @@ def get_base_dir():
     os.makedirs(nanochat_dir, exist_ok=True)
     return nanochat_dir
 
+HF_OFFICIAL_ENDPOINT = "https://huggingface.co"
+# mirrors tend to 403 the default Python-urllib/x.y User-Agent, so send our own
+HF_HEADERS = {"User-Agent": "nanochat/1.0"}
+
+def hf_endpoint():
+    """
+    Base url for the HuggingFace hub. Set HF_ENDPOINT to use a mirror, e.g.
+    export HF_ENDPOINT=https://hf-mirror.com
+    Same variable name huggingface_hub itself uses, so one setting covers everything.
+    """
+    return os.environ.get("HF_ENDPOINT", HF_OFFICIAL_ENDPOINT).rstrip("/")
+
+def hf_rewrite_url(url):
+    """
+    Point a huggingface.co url at the configured endpoint. Mirrors proxy the hub API
+    but hand back absolute huggingface.co urls in the response body, so following those
+    verbatim would silently bypass the mirror.
+    """
+    endpoint = hf_endpoint()
+    if endpoint != HF_OFFICIAL_ENDPOINT and url.startswith(HF_OFFICIAL_ENDPOINT):
+        return endpoint + url[len(HF_OFFICIAL_ENDPOINT):]
+    return url
+
 def download_file_with_lock(url, filename, postprocess_fn=None):
     """
     Downloads a file from a URL to a local path in the base directory.
@@ -101,7 +124,7 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
 
         # Download the content as bytes
         print(f"Downloading {url}...")
-        with urllib.request.urlopen(url) as response:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=HF_HEADERS)) as response:
             content = response.read() # bytes
 
         # Write to local file
