@@ -8,6 +8,8 @@ Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
 import os
 import json
 import random
+import time
+import urllib.error
 import urllib.request
 
 import numpy as np
@@ -15,7 +17,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from filelock import FileLock
 
-from nanochat.common import get_base_dir
+from nanochat.common import HF_HEADERS, get_base_dir, hf_endpoint, hf_rewrite_url
 
 
 class HubDataset:
@@ -42,6 +44,45 @@ class HubDataset:
         return row
 
 
+def download_file(url, target_path, max_attempts=8, chunk_size=1 << 20):
+    """
+    Download a url to target_path, resuming into a .part file if the connection
+    drops mid-transfer. Hub downloads are hundreds of MB, so a single read() is
+    fragile: any hiccup restarts (or worse, kills) the whole run.
+    """
+    part_path = target_path + ".part"
+    for attempt in range(max_attempts):
+        downloaded = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+        request = urllib.request.Request(url, headers=HF_HEADERS)
+        if downloaded > 0:
+            request.add_header("Range", f"bytes={downloaded}-")
+        try:
+            with urllib.request.urlopen(request) as response:
+                if downloaded > 0 and response.status != 206:
+                    # server ignored the Range header, start over from scratch
+                    downloaded = 0
+                remaining = response.headers.get("Content-Length")
+                total = downloaded + int(remaining) if remaining is not None else None
+                mode = "ab" if downloaded > 0 else "wb"
+                with open(part_path, mode) as f:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+            if total is not None and os.path.getsize(part_path) != total:
+                raise IOError(f"Expected {total} bytes, got {os.path.getsize(part_path)}")
+            os.rename(part_path, target_path)
+            return
+        except (urllib.error.URLError, IOError) as e:
+            if attempt == max_attempts - 1:
+                raise
+            delay = 2 ** attempt
+            print(f"Download failed ({e}), retrying in {delay}s (attempt {attempt + 2}/{max_attempts}) ...")
+            time.sleep(delay)
+
+
 def load_hub_dataset(repo_id, subset="default", split="train"):
     """
     Minimal stand-in for HuggingFace datasets.load_dataset(repo_id, subset, split=split).
@@ -60,17 +101,19 @@ def load_hub_dataset(repo_id, subset="default", split="train"):
             # only a single rank acquires the lock and downloads, the others block
             # here and then skip the download because they recheck the manifest
             if not os.path.exists(manifest_path):
-                listing_url = f"https://huggingface.co/api/datasets/{repo_id}/parquet/{subset}/{split}"
-                with urllib.request.urlopen(listing_url) as response:
+                listing_url = f"{hf_endpoint()}/api/datasets/{repo_id}/parquet/{subset}/{split}"
+                listing_request = urllib.request.Request(listing_url, headers=HF_HEADERS)
+                with urllib.request.urlopen(listing_request) as response:
                     shard_urls = json.loads(response.read())
+                # the listing comes back with absolute huggingface.co urls even from a mirror
+                shard_urls = [hf_rewrite_url(url) for url in shard_urls]
                 filenames = []
                 for shard_index, shard_url in enumerate(shard_urls):
                     filename = f"{shard_index:05d}.parquet"
-                    print(f"Downloading {shard_url} ...")
-                    with urllib.request.urlopen(shard_url) as response:
-                        content = response.read()
-                    with open(os.path.join(shards_dir, filename), "wb") as f:
-                        f.write(content)
+                    shard_path = os.path.join(shards_dir, filename)
+                    if not os.path.exists(shard_path):
+                        print(f"Downloading {shard_url} ...")
+                        download_file(shard_url, shard_path)
                     filenames.append(filename)
                 with open(manifest_path, "w") as f:
                     json.dump(filenames, f)

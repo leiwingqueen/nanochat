@@ -14,13 +14,14 @@ import requests
 import pyarrow.parquet as pq
 from multiprocessing import Pool
 
-from nanochat.common import get_base_dir
+from nanochat.common import HF_HEADERS, get_base_dir, hf_endpoint
 
 # -----------------------------------------------------------------------------
 # The specifics of the current pretraining dataset
 
 # The URL on the internet where the data is hosted and downloaded from on demand
-BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
+# (honors HF_ENDPOINT, so a mirror can be used instead of huggingface.co)
+BASE_URL = f"{hf_endpoint()}/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
 MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
 index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
 base_dir = get_base_dir()
@@ -99,7 +100,7 @@ def download_single_file(index):
     max_attempts = 5
     for attempt in range(1, max_attempts + 1):
         try:
-            response = requests.get(url, stream=True, timeout=30)
+            response = requests.get(url, stream=True, timeout=30, headers=HF_HEADERS)
             response.raise_for_status()
             # Write to temporary file first
             temp_path = filepath + f".tmp"
